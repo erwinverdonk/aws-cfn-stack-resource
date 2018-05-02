@@ -83,9 +83,14 @@
 
 Object.defineProperty(exports, "__esModule", { value: true });
 const aws_cfn_wait_1 = __webpack_require__(1);
-const stack_1 = __webpack_require__(5);
+const stack_1 = __webpack_require__(9);
 exports.handler = (event, context, callback) => {
-    aws_cfn_wait_1.AwsCfnWait.create({ CustomResource: stack_1.Stack, event, context, callback });
+    aws_cfn_wait_1.AwsCfnWait.create({ CustomResource: stack_1.Stack, event, context, callback })
+        .catch(_ => {
+        console.error(_);
+        callback(_, null);
+        process.exit();
+    });
 };
 
 
@@ -95,18 +100,29 @@ exports.handler = (event, context, callback) => {
 
 "use strict";
 
+var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
+    return new (P || (P = Promise))(function (resolve, reject) {
+        function fulfilled(value) { try { step(generator.next(value)); } catch (e) { reject(e); } }
+        function rejected(value) { try { step(generator["throw"](value)); } catch (e) { reject(e); } }
+        function step(result) { result.done ? resolve(result.value) : new P(function (resolve) { resolve(result.value); }).then(fulfilled, rejected); }
+        step((generator = generator.apply(thisArg, _arguments || [])).next());
+    });
+};
 Object.defineProperty(exports, "__esModule", { value: true });
 const HTTPS = __webpack_require__(2);
 const URL = __webpack_require__(3);
 const AWS = __webpack_require__(4);
+const uuid = __webpack_require__(5);
 exports.AwsCfnWait = {
     create: ({ CustomResource, waitDelay = 60000, event, context, callback }) => {
-        const init = (event) => {
+        const init = (event) => __awaiter(this, void 0, void 0, function* () {
             const finish = (options, responseBody, callback) => (error, data) => {
                 console.log('Finish');
                 responseBody.PhysicalResourceId = (Object.assign({}, data).PhysicalResourceId ||
                     event.PhysicalResourceId ||
-                    event.RequestId);
+                    event.RequestId ||
+                    responseBody.RequestId ||
+                    uuid());
                 responseBody.Data = error || data;
                 responseBody.Status = error ? 'FAILED' : 'SUCCESS';
                 const responseBodyStr = JSON.stringify(responseBody);
@@ -117,6 +133,7 @@ exports.AwsCfnWait = {
                 request.on('error', _ => callback(_, null));
                 request.write(responseBodyStr);
                 request.end();
+                return responseBody;
             };
             const getResponseReceiver = (callback) => {
                 if (!event.WaitProperties) {
@@ -167,14 +184,11 @@ exports.AwsCfnWait = {
                 if (result) {
                     console.log('success', JSON.stringify(result));
                 }
-                if (event.RequestType === 'Delete') {
-                    return responseReceiver.finish();
-                }
-                return customResource.wait(result)
-                    .then((_) => {
+                customResource.wait(result)
+                    .then(waitResult => {
                     return new Promise((resolve, reject) => {
-                        console.log('Wait result:', JSON.stringify(_));
-                        if (_.shouldWait) {
+                        console.log('Wait result:', JSON.stringify(waitResult));
+                        if (waitResult.shouldWait) {
                             console.log('We are not yet done waiting, lets wait some more...');
                             console.log(`Rechecking status in ${waitDelay} milliseconds`);
                             setTimeout(() => {
@@ -188,6 +202,7 @@ exports.AwsCfnWait = {
                                         FunctionName: context.invokedFunctionArn,
                                         InvocationType: 'Event',
                                         Payload: JSON.stringify({
+                                            RequestType: event.RequestType,
                                             ResourceProperties: event.ResourceProperties,
                                             WaitProperties: event.WaitProperties || {
                                                 responseData: result,
@@ -197,24 +212,21 @@ exports.AwsCfnWait = {
                                     })
                                         .promise()
                                         .then(_ => resolve({ canFinish: false, result: _ }))
-                                        .catch(_ => reject({ canFinish: true, error: _ }));
+                                        .catch(_ => reject(_));
                                 }
                                 else {
                                     reject({
-                                        canFinish: true,
-                                        error: {
-                                            message: 'Response URL has expired. Waiting canceled!'
-                                        }
+                                        message: 'Response URL has expired. Waiting canceled!'
                                     });
                                 }
                             }, waitDelay);
                         }
                         else {
-                            resolve({ canFinish: true, result: _.result });
+                            resolve({ canFinish: true, result: waitResult.result });
                         }
                     });
                 })
-                    .then((_) => {
+                    .then(_ => {
                     if (_.canFinish) {
                         responseReceiver.finish(null, _.result);
                     }
@@ -222,18 +234,15 @@ exports.AwsCfnWait = {
                         responseReceiver.callback(null, _.result);
                     }
                 })
-                    .catch((_) => {
-                    if (_.canFinish) {
-                        responseReceiver.finish(_.error, null);
-                    }
-                    else {
-                        responseReceiver.callback(_.error, null);
-                    }
+                    .catch(_ => {
+                    responseReceiver.finish(_, null);
                 });
+                return result;
             };
             const getErrorHandler = (responseReceiver) => (_) => {
                 console.error('failed', JSON.stringify(_, Object.getOwnPropertyNames(_)));
-                responseReceiver.callback({ error: _ }, null);
+                responseReceiver.finish({ error: _ }, null);
+                return _;
             };
             const responseReceiver = getResponseReceiver((error, result) => {
                 if (result) {
@@ -246,21 +255,22 @@ exports.AwsCfnWait = {
             });
             console.log('event', JSON.stringify(event));
             console.log('context', JSON.stringify(context));
-            CustomResource.create(event, context)
-                .then((cr) => {
-                if (!event.WaitProperties) {
-                    cr.customResource()
-                        .then((requestMethods) => requestMethods[event.RequestType.toLowerCase()])
-                        .then((requestMethod) => requestMethod()
-                        .then(getResultHandler(responseReceiver, cr))
-                        .catch(getErrorHandler(responseReceiver)));
-                }
-                else {
-                    getResultHandler(responseReceiver, cr)(event.WaitProperties.responseData);
-                }
-            });
-        };
-        init(typeof event === 'string' ? JSON.parse(event) : event);
+            const cr = yield CustomResource.create(event, context);
+            const resultHandler = getResultHandler(responseReceiver, cr);
+            const errorHandler = getErrorHandler(responseReceiver);
+            if (!event.WaitProperties) {
+                return cr.customResource()
+                    .then(requestMethods => requestMethods[event.RequestType.toLowerCase()])
+                    .then(requestMethod => requestMethod())
+                    .then(resultHandler)
+                    .catch(errorHandler);
+            }
+            else {
+                resultHandler(event.WaitProperties.responseData);
+                return Promise.resolve(event.WaitProperties.responseData);
+            }
+        });
+        return init(typeof event === 'string' ? JSON.parse(event) : event);
     }
 };
 
@@ -285,6 +295,90 @@ module.exports = require("aws-sdk");
 
 /***/ }),
 /* 5 */
+/***/ (function(module, exports, __webpack_require__) {
+
+var rng = __webpack_require__(6);
+var bytesToUuid = __webpack_require__(8);
+
+function v4(options, buf, offset) {
+  var i = buf && offset || 0;
+
+  if (typeof(options) == 'string') {
+    buf = options === 'binary' ? new Array(16) : null;
+    options = null;
+  }
+  options = options || {};
+
+  var rnds = options.random || (options.rng || rng)();
+
+  // Per 4.4, set bits for version and `clock_seq_hi_and_reserved`
+  rnds[6] = (rnds[6] & 0x0f) | 0x40;
+  rnds[8] = (rnds[8] & 0x3f) | 0x80;
+
+  // Copy bytes to buffer, if provided
+  if (buf) {
+    for (var ii = 0; ii < 16; ++ii) {
+      buf[i + ii] = rnds[ii];
+    }
+  }
+
+  return buf || bytesToUuid(rnds);
+}
+
+module.exports = v4;
+
+
+/***/ }),
+/* 6 */
+/***/ (function(module, exports, __webpack_require__) {
+
+// Unique ID creation requires a high quality random # generator.  In node.js
+// this is pretty straight-forward - we use the crypto API.
+
+var crypto = __webpack_require__(7);
+
+module.exports = function nodeRNG() {
+  return crypto.randomBytes(16);
+};
+
+
+/***/ }),
+/* 7 */
+/***/ (function(module, exports) {
+
+module.exports = require("crypto");
+
+/***/ }),
+/* 8 */
+/***/ (function(module, exports) {
+
+/**
+ * Convert array of 16 byte values to UUID string format of the form:
+ * XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX
+ */
+var byteToHex = [];
+for (var i = 0; i < 256; ++i) {
+  byteToHex[i] = (i + 0x100).toString(16).substr(1);
+}
+
+function bytesToUuid(buf, offset) {
+  var i = offset || 0;
+  var bth = byteToHex;
+  return bth[buf[i++]] + bth[buf[i++]] +
+          bth[buf[i++]] + bth[buf[i++]] + '-' +
+          bth[buf[i++]] + bth[buf[i++]] + '-' +
+          bth[buf[i++]] + bth[buf[i++]] + '-' +
+          bth[buf[i++]] + bth[buf[i++]] + '-' +
+          bth[buf[i++]] + bth[buf[i++]] +
+          bth[buf[i++]] + bth[buf[i++]] +
+          bth[buf[i++]] + bth[buf[i++]];
+}
+
+module.exports = bytesToUuid;
+
+
+/***/ }),
+/* 9 */
 /***/ (function(module, exports, __webpack_require__) {
 
 "use strict";
@@ -335,7 +429,7 @@ exports.Stack = {
         };
         const deleteStack = (cfn, stackProps) => () => {
             console.log('Delete stack with template:', JSON.stringify(stackProps));
-            return cfn.deleteStack({ StackName: stackProps.StackName }).promise()
+            return cfn.deleteStack({ StackName: event.PhysicalResourceId }).promise()
                 .then(describeStack(cfn, stackProps))
                 .then(stack => (Object.assign({}, outputsExtractor(stack.Outputs), { PhysicalResourceId: stack.StackId })))
                 .catch(describeStackEventsAndHandleError(cfn, stackProps));
@@ -362,14 +456,15 @@ exports.Stack = {
             return {
                 wait: () => {
                     const props = event.ResourceProperties;
-                    console.log('WaitForStackComplete');
+                    const waitProps = event.WaitProperties;
+                    console.log('WaitForComplete');
                     console.log('StackName:', props.Stack.StackName);
                     const cfn = new AWS.CloudFormation({
                         region: props.Region,
                         credentials: creds
                     });
                     return cfn.describeStacks({
-                        StackName: props.Stack.StackName
+                        StackName: waitProps ? waitProps.responseData.PhysicalResourceId : props.Stack.StackName
                     }).promise()
                         .then(_ => _.Stacks[0])
                         .then(stack => {

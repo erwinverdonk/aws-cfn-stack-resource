@@ -15,9 +15,7 @@ const run = () => {
     '@erwinverdonk/aws-lambda-upload-deploy'
   ).AwsLambdaUploadDeploy;
 
-  const functionName = (
-    `AwsCfnStackResource-${pjson.version.replace(/\./g, '-')}`
-  );
+  const functionName = 'AwsCfnStackResource';
 
   AwsLambdaUploadDeploy({
     functionName,
